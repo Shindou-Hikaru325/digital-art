@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Identity - 互动艺术</title>
+    <style>
+        /* ==========================================
+           CSS 样式定义 (赛博朋克深色系 & 毛玻璃)
+           ========================================== */
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #0B0C10; /* 赛博朋克深色背景 */
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #ffffff;
+        }
+
+        /* Canvas 铺满全屏，置于底层 */
+        #main-canvas, #three-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 1;
+        }
+        
+        #three-canvas {
+            display: none; /* 默认隐藏，由状态机控制 */
+        }
+
+        /* DOM 卡片容器，置于 Canvas 之上 */
+        #cards-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            z-index: 2;
+            pointer-events: none; /* 不阻挡交互 */
+        }
+
+        /* 毛玻璃拟物风卡片 (Glassmorphism) */
+        .glass-card {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+            border-radius: 16px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transform: translate(-50%, -50%);
+            will-change: left, top;
+        }
+
+        /* 加载提示屏 */
+        #loading-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background-color: #0B0C10;
+            z-index: 999;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: opacity 1s ease;
+        }
+
+        .loader {
+            border: 4px solid rgba(255,255,255,0.1);
+            border-top: 4px solid #66fcf1; /* 赛博朋克青色点缀 */
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .instructions {
+            margin-top: 20px;
+            color: #c5c6c7;
+            text-align: center;
+            line-height: 1.6;
+            font-size: 0.9rem;
+        }
+    </style>
+
+    <!-- 引入 GSAP 动画库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <!-- 引入 Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    
+    <!-- 引入 MediaPipe 核心与模型 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <!-- 加载界面 -->
+    <div id="loading-screen">
+        <div class="loader"></div>
+        <div>正在初始化 AI 视觉模型...</div>
+        <div class="instructions">
+            <p>交互指南：</p>
+            <p>✊ 握拳/默认：破碎的数字面具</p>
+            <p>🖐️ 张开手掌：召唤虚拟社交标签</p>
+            <p>⏳ 保持张开 5 秒：信息过载</p>
+            <p>🌪️ 剧烈晃动头部或手部：挣脱标签</p>
+        </div>
+    </div>
+
+    <!-- 隐藏的视频源 -->
+    <video id="input-video" style="display: none;" playsinline muted autoplay></video>
+    
+    <!-- 渲染画布 -->
+    <canvas id="three-canvas"></canvas>
+    <canvas id="main-canvas"></canvas>
+    
+    <!-- DOM 卡片容器 -->
+    <div id="cards-container"></div>
+
+    <script>
+        /* ==========================================
+           全局变量与配置
+           ========================================== */
+        const videoElement = document.getElementById('input-video');
+        const canvas = document.getElementById('main-canvas');
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const cardsContainer = document.getElementById('cards-container');
+        
+        /* ==========================================
+           模块 2.5: Three.js 状态0 (3D 珐琅网格涟漪) 变量声明
+           ========================================== */
+        const threeCanvas = document.getElementById('three-canvas');
+        let renderer3D, scene3D, camera3D, instancedMesh, bgMesh, videoTex;
+        const cols3D = 40; 
+        const rows3D = 30; 
+        const count3D = cols3D * rows3D;
+        let motionData = new Float32Array(count3D);
+        let lastImageData = null;
+        const motionCanvas = document.createElement('canvas');
+        motionCanvas.width = cols3D;
+        motionCanvas.height = rows3D;
+        const motionCtx = motionCanvas.getContext('2d', { willReadFrequently: true });
+        const dummy3D = new THREE.Object3D();
+        const _color = new THREE.Color(); // 用于马赛克颜色采样
+        let time3D = 0;
+        let frameCount = 0; // 用于节流 getImageData
+        
+        let width = window.innerWidth;
+        let height = window.innerHeight;
+        
+        function resizeCanvas() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            if (typeof updateThreeJSLayout === 'function') {
+                updateThreeJSLayout();
+            }
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // 追踪数据
+        let currentFaceLandmarks = null;
+        let facePos = { x: width / 2, y: height / 2 };
+        let handPos = { x: width / 2, y: height / 2 };
+        let lastFacePos = { x: width / 2, y: height / 2 };
+        let lastHandPos = { x: width / 2, y: height / 2 };
+        let faceVel = 0;
+        let handVel = 0;
+        let isHandOpen = false;
+        let isPointing = false;
+        let indexTipPos = { x: 0, y: 0 };
+
+        // 坐标映射 (处理 MediaPipe 归一化坐标到镜像全屏 Canvas 的映射)
+        function mapPos(x, y) {
+            // 镜像 X 轴
+            return { x: (1 - x) * width, y: y * height };
+        }
+
+        /* ==========================================
+           模块 1: MediaPipe 初始化
+           ========================================== */
+        let modelsLoaded = 0;
+        function checkModelsLoaded() {
+            modelsLoaded++;
+            if (modelsLoaded === 2) {
+                const loader = document.getElementById('loading-screen');
+                loader.style.opacity = '0';
+                setTimeout(() => loader.style.display = 'none', 1000);
+            }
+        }
+
+        // --- Face Mesh ---
+        const faceMesh = new FaceMesh({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`;
+        }});
+        faceMesh.setOptions({
+            maxNumFaces: 1,
+            refineLandmarks: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        faceMesh.onResults((results) => {
+            if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+                currentFaceLandmarks = results.multiFaceLandmarks[0];
+                const nose = currentFaceLandmarks[1]; // 鼻尖坐标
+                const newPos = mapPos(nose.x, nose.y);
+                faceVel = Math.hypot(newPos.x - lastFacePos.x, newPos.y - lastFacePos.y);
+                lastFacePos = newPos;
+                facePos = newPos;
+            } else {
+                faceVel = 0;
+            }
+        });
+        // Initialization moved to initModels()
+
+        // --- Hands ---
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`;
+        }});
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        hands.onResults((results) => {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const hand = results.multiHandLandmarks[0];
+                
+                // 计算手掌是否张开 (通过指尖到手腕的平均距离判断)
+                const wrist = hand[0];
+                const tips = [hand[8], hand[12], hand[16], hand[20]]; // 食指、中指、无名指、小指尖
+                let avgDist = 0;
+                tips.forEach(tip => {
+                    avgDist += Math.hypot(tip.x - wrist.x, tip.y - wrist.y);
+                });
+                avgDist /= 4;
+                isHandOpen = avgDist > 0.3; // 阈值
+
+                // 检测“1”手势 (食指伸出，其他手指收回)
+                // 8: 食指尖, 6: 食指第二关节
+                // 12: 中指尖, 10: 中指第二关节
+                // 16: 无名指尖, 14: 无名指第二关节
+                // 20: 小指尖, 18: 小指第二关节
+                const isIndexUp = hand[8].y < hand[6].y;
+                const isMiddleDown = hand[12].y > hand[10].y;
+                const isRingDown = hand[16].y > hand[14].y;
+                const isPinkyDown = hand[20].y > hand[18].y;
+                
+                isPointing = isIndexUp && isMiddleDown && isRingDown && isPinkyDown;
+                if (isPointing) {
+                    indexTipPos = mapPos(hand[8].x, hand[8].y);
+                }
+
+                // 获取手掌中心 (中指根部)
+                const center = hand[9];
+                const newPos = mapPos(center.x, center.y);
+                handVel = Math.hypot(newPos.x - lastHandPos.x, newPos.y - lastHandPos.y);
+                lastHandPos = newPos;
+                handPos = newPos;
+            } else {
+                isHandOpen = false;
+                isPointing = false;
+                handVel = 0;
+            }
+        });
+        // --- 启动摄像头 ---
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await faceMesh.send({image: videoElement});
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+
+        async function initModels() {
+            try {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error("您的浏览器不支持访问摄像头，或者当前环境不是安全连接 (HTTPS)。");
+                }
+                
+                initThreeJS(); // 初始化 Three.js
+                
+                // Sequential initialization prevents Emscripten Module conflicts
+                await faceMesh.initialize();
+                checkModelsLoaded();
+                
+                await hands.initialize();
+                checkModelsLoaded();
+                
+                await camera.start();
+            } catch (error) {
+                console.error("Initialization error:", error);
+                const loader = document.getElementById('loading-screen');
+                loader.innerHTML = `
+                    <div style="background: rgba(15, 15, 20, 0.95); border: 1px solid #ff4444; border-radius: 16px; padding: 30px; text-align: center; max-width: 400px; box-shadow: 0 0 30px rgba(255, 68, 68, 0.2); color: #ffffff;">
+                        <div style="font-size: 40px; margin-bottom: 15px;">📷</div>
+                        <h3 style="margin-bottom: 10px; color: #ff4444;">摄像头访问受阻</h3>
+                        <p style="font-size: 14px; line-height: 1.6; margin-bottom: 25px; opacity: 0.9;">
+                            应用需要摄像头权限来捕捉您的动作。请在浏览器弹窗中选择“允许”，或检查地址栏右侧的权限设置。
+                        </p>
+                        <button onclick="location.reload()" style="background: #ff4444; color: white; border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer; font-weight: 600; transition: all 0.2s;">
+                            重新尝试授权
+                        </button>
+                        <div style="margin-top: 20px; font-size: 11px; opacity: 0.6; text-align: left; border-top: 1px solid rgba(255,68,68,0.2); padding-top: 15px;">
+                            错误类型: ${error.name || 'Error'}<br>
+                            详细信息: ${error.message}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+        initModels();
+
+        /* ==========================================
+           模块 2: 物理粒子系统与 DOM 卡片
+           ========================================== */
+        const emojis = ['❤️', '🔥', '👍', '😂', '😍', '🥰', '😎', '✨', '🙌', '💬', '📱', '💯'];
+        let domCards = [];
+        let particles = [];
+        let hearts = [];
+
+        // --- Like 爱心类 ---
+        class Heart {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.size = 15 + Math.random() * 20;
+                this.vx = (Math.random() - 0.5) * 6;
+                this.vy = -4 - Math.random() * 6; // 向上喷射
+                this.opacity = 1;
+                this.rotation = (Math.random() - 0.5) * 0.5;
+                this.hue = Math.random() * 20 - 10; // 红色微调
+                this.oscillation = Math.random() * Math.PI * 2; // 自然晃动
+            }
+
+            update() {
+                this.x += this.vx + Math.sin(this.oscillation) * 2;
+                this.y += this.vy;
+                this.vy += 0.15; // 模拟重力
+                this.oscillation += 0.1;
+                this.opacity -= 0.012;
+                this.size *= 0.98;
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, this.opacity);
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.rotation);
+                
+                // 绘制爱心
+                const s = this.size;
+                ctx.fillStyle = `hsl(${this.hue}, 100%, 60%)`;
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.bezierCurveTo(-s/2, -s/2, -s, s/3, 0, s);
+                ctx.bezierCurveTo(s, s/3, s/2, -s/2, 0, 0);
+                ctx.fill();
+                
+                ctx.restore();
+            }
+        }
+
+        // --- DOM 卡片类 (State 1 & 2) ---
+        class DOMCard {
+            constructor() {
+                this.el = document.createElement('div');
+                this.el.className = 'glass-card';
+                this.emoji = emojis[Math.floor(Math.random() * emojis.length)];
+                this.el.innerText = this.emoji;
+                
+                const size = 50 + Math.random() * 70;
+                this.el.style.width = size + 'px';
+                this.el.style.height = size + 'px';
+                this.el.style.fontSize = (size * 0.5) + 'px';
+                
+                this.x = handPos.x;
+                this.y = handPos.y;
+                // 随机偏移量，形成环绕手部的星系感
+                this.offsetX = (Math.random() - 0.5) * 400;
+                this.offsetY = (Math.random() - 0.5) * 400;
+                
+                cardsContainer.appendChild(this.el);
+
+                // 使用 GSAP 制作自身的上下浮动动画
+                this.anim = gsap.to(this, {
+                    offsetY: this.offsetY + (Math.random() > 0.5 ? 40 : -40),
+                    duration: 1.5 + Math.random() * 2,
+                    yoyo: true,
+                    repeat: -1,
+                    ease: "sine.inOut"
+                });
+            }
+
+            update() {
+                // Lerp 线性插值跟随，制造阻尼延迟感
+                const destX = handPos.x + this.offsetX;
+                const destY = handPos.y + this.offsetY;
+                this.x += (destX - this.x) * 0.08;
+                this.y += (destY - this.y) * 0.08;
+                this.el.style.left = `${this.x}px`;
+                this.el.style.top = `${this.y}px`;
+            }
+
+            destroy() {
+                this.anim.kill();
+                this.el.remove();
+            }
+        }
+
+        // --- Canvas 粒子类 (State 3 & 4) ---
+        class Particle {
+            constructor(x, y, emoji) {
+                this.x = x;
+                this.y = y;
+                this.vx = 0;
+                this.vy = 0;
+                this.emoji = emoji;
+                this.baseSize = 25 + Math.random() * 35;
+                this.size = this.baseSize;
+                this.rotation = Math.random() * Math.PI * 2;
+                this.vr = (Math.random() - 0.5) * 0.15;
+                this.phase = Math.random() * Math.PI * 2;
+                
+                // 随机分配一个面部特征点索引，用于“粘贴”效果
+                // 0-467 是 MediaPipe FaceMesh 的特征点
+                this.targetIndex = Math.floor(Math.random() * 468);
+                this.isStuck = false;
+                this.stuckOffset = { x: (Math.random() - 0.5) * 20, y: (Math.random() - 0.5) * 20 };
+            }
+
+            update(state) {
+                this.phase += 0.05;
+                // 呼吸缩放效果
+                this.size = this.baseSize * (1 + Math.sin(this.phase) * 0.15);
+
+                if (state === 3) {
+                    // 状态 3: 数字同化 - 粘贴在人物轮廓/特征点上
+                    let targetX = facePos.x;
+                    let targetY = facePos.y;
+
+                    if (currentFaceLandmarks && currentFaceLandmarks[this.targetIndex]) {
+                        const lm = currentFaceLandmarks[this.targetIndex];
+                        const pos = mapPos(lm.x, lm.y);
+                        targetX = pos.x + this.stuckOffset.x;
+                        targetY = pos.y + this.stuckOffset.y;
+                    }
+
+                    const dx = targetX - this.x;
+                    const dy = targetY - this.y;
+                    const dist = Math.hypot(dx, dy);
+
+                    if (dist < 5) {
+                        this.isStuck = true;
+                        this.x = targetX;
+                        this.y = targetY;
+                        this.vx = 0;
+                        this.vy = 0;
+                    } else {
+                        this.isStuck = false;
+                        const force = 0.15;
+                        this.vx += dx * force;
+                        this.vy += dy * force;
+                        this.vx *= 0.85;
+                        this.vy *= 0.85;
+                    }
+                } else if (state === 4) {
+                    // 状态 4: 挣脱状态 - 剧烈晃动并飞离
+                    this.isStuck = false;
+                    this.vx += (Math.random() - 0.5) * 3;
+                    this.vy += (Math.random() - 0.5) * 3;
+                    
+                    this.vx *= 0.98;
+                    this.vy *= 0.98;
+
+                    if (this.x < 0 || this.x > width) {
+                        this.vx *= -0.8;
+                        this.x = Math.max(0, Math.min(width, this.x));
+                    }
+                    if (this.y < 0 || this.y > height) {
+                        this.vy *= -0.8;
+                        this.y = Math.max(0, Math.min(height, this.y));
+                    }
+                }
+
+                if (!this.isStuck || state === 4) {
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    this.rotation += this.vr;
+                }
+            }
+
+            draw(ctx) {
+                ctx.save();
+                // 移除透明度，使用实心 Emoji
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.rotation);
+                
+                ctx.font = `${Math.round(this.size)}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(this.emoji, 0, 0);
+                ctx.restore();
+            }
+        }
+
+        /* ==========================================
+           模块 3: 状态机控制 (State Machine)
+           ========================================== */
+        let currentState = 0; 
+        // 0: 破碎的面具 (默认/握拳)
+        // 1: 虚拟社交浮现 (张开手)
+        // 2: 信息过载 (张开手保持5秒)
+        // 3: 数字同化 (卡片达到60个)
+        // 4: 挣脱标签 (剧烈晃动)
+
+        let state1StartTime = 0;
+        let lastCardAddTime = 0;
+        let state4EndTime = 0;
+
+        function updateStateMachine() {
+            // 检测剧烈晃动 (加速度/速度阈值)
+            const shakeThreshold = 60; // 像素/帧
+            const isShaking = faceVel > shakeThreshold || handVel > shakeThreshold;
+
+            // 状态 3 -> 4: 挣脱标签
+            if (currentState === 3 && isShaking) {
+                currentState = 4;
+                state4EndTime = Date.now() + 2000; // 弹跳持续 2 秒
+                
+                // 赋予爆炸初速度
+                particles.forEach(p => {
+                    const angle = Math.random() * Math.PI * 2;
+                    const speed = 30 + Math.random() * 40;
+                    p.vx = Math.cos(angle) * speed;
+                    p.vy = Math.sin(angle) * speed;
+                    p.vr = (Math.random() - 0.5) * 0.5;
+                });
+            }
+
+            // 状态 4 -> 3: 恢复同化
+            if (currentState === 4 && Date.now() > state4EndTime) {
+                currentState = 3;
+            }
+
+            // 如果手握拳，且当前不在物理粒子状态，则重置为状态 0
+            if (!isHandOpen && currentState < 3) {
+                if (currentState !== 0) {
+                    currentState = 0;
+                    domCards.forEach(c => c.destroy());
+                    domCards = [];
+                }
+            }
+
+            // 状态 0 -> 1 -> 2 -> 3 推进逻辑
+            if (isHandOpen && currentState < 3) {
+                if (currentState === 0) {
+                    currentState = 1;
+                    state1StartTime = Date.now();
+                    for(let i = 0; i < 5; i++) domCards.push(new DOMCard());
+                } else if (currentState === 1) {
+                    if (Date.now() - state1StartTime > 5000) {
+                        currentState = 2;
+                    }
+                } else if (currentState === 2) {
+                    // 每秒生成多张卡片，加速过载感
+                    if (Date.now() - lastCardAddTime > 200) {
+                        domCards.push(new DOMCard());
+                        lastCardAddTime = Date.now();
+                    }
+                    if (domCards.length >= 30) {
+                        currentState = 3;
+                        // DOM 转 Canvas 粒子
+                        domCards.forEach(c => {
+                            particles.push(new Particle(c.x, c.y, c.emoji));
+                            c.destroy();
+                        });
+                        domCards = [];
+                    }
+                }
+            }
+            
+            // 如果在状态 3/4 时握拳，重置整个体验
+            if (!isHandOpen && currentState >= 3) {
+                currentState = 0;
+                particles = [];
+            }
+        }
+
+        /* ==========================================
+           模块 4: Canvas 绘制与主循环
+           ========================================== */
+        
+        /* ==========================================
+           模块 2.5: Three.js 状态0 (3D 珐琅网格涟漪)
+           ========================================== */
+        function initThreeJS() {
+            renderer3D = new THREE.WebGLRenderer({ canvas: threeCanvas, alpha: true, antialias: true });
+            renderer3D.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            
+            scene3D = new THREE.Scene();
+            camera3D = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera3D.position.z = 40;
+
+            // 移除所有灯光以获得最真实的原始色彩，避免色调偏移（如泛绿）
+            
+            videoTex = new THREE.VideoTexture(videoElement);
+            videoTex.minFilter = THREE.LinearFilter;
+            videoTex.magFilter = THREE.LinearFilter;
+
+            // 移除背景视频平面 bgMesh，只保留分割开的马赛克效果
+
+            // 实例化网格 (使用 MeshBasicMaterial 以确保画面色彩真实，不受灯光影响)
+            const geometry = new THREE.PlaneGeometry(1, 1);
+            const material = new THREE.MeshBasicMaterial({
+                color: 0xffffff,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 1.0 // 状态0完全不透明，形成分割感
+            });
+
+            instancedMesh = new THREE.InstancedMesh(geometry, material, count3D);
+            instancedMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(count3D * 3), 3);
+            scene3D.add(instancedMesh);
+            
+            updateThreeJSLayout();
+        }
+
+        function updateThreeJSLayout() {
+            if (!camera3D) return;
+            camera3D.aspect = window.innerWidth / window.innerHeight;
+            camera3D.updateProjectionMatrix();
+            renderer3D.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function updateThreeJS() {
+            if (!instancedMesh) return;
+            time3D += 0.03;
+
+            let currentImageData = null;
+            // 节流：每 2 帧读取一次像素数据，大幅降低 CPU/GPU 同步开销
+            if (videoElement.readyState === videoElement.HAVE_ENOUGH_DATA && frameCount % 2 === 0) {
+                motionCtx.drawImage(videoElement, 0, 0, cols3D, rows3D);
+                currentImageData = motionCtx.getImageData(0, 0, cols3D, rows3D);
+            }
+
+            const vFov = camera3D.fov * Math.PI / 180;
+            const visibleHeight = 2 * Math.tan(vFov / 2) * camera3D.position.z;
+            const visibleWidth = visibleHeight * camera3D.aspect;
+            
+            const cubeW = visibleWidth / cols3D;
+            const cubeH = visibleHeight / rows3D;
+            const startX = -visibleWidth / 2 + cubeW / 2;
+            const startY = visibleHeight / 2 - cubeH / 2;
+
+            let i = 0;
+            for (let r = 0; r < rows3D; r++) {
+                for (let c = 0; c < cols3D; c++) {
+                    const idx = i * 4;
+                    
+                    if (currentImageData) {
+                        // 1. 运动检测
+                        if (lastImageData) {
+                            const rDiff = Math.abs(currentImageData.data[idx] - lastImageData.data[idx]);
+                            const gDiff = Math.abs(currentImageData.data[idx+1] - lastImageData.data[idx+1]);
+                            const bDiff = Math.abs(currentImageData.data[idx+2] - lastImageData.data[idx+2]);
+                            const diff = (rDiff + gDiff + bDiff) / 3;
+                            
+                            if (diff > 12) { 
+                                motionData[i] += diff * 0.015; 
+                            }
+                        }
+                        
+                        // 2. 颜色采样 (将摄像头像素映射到 3D 马赛克方块)
+                        const rVal = currentImageData.data[idx] / 255;
+                        const gVal = currentImageData.data[idx+1] / 255;
+                        const bVal = currentImageData.data[idx+2] / 255;
+                        _color.setRGB(rVal, gVal, bVal);
+                        instancedMesh.setColorAt(i, _color);
+                    }
+                    
+                    motionData[i] *= 0.90; // 阻尼衰减
+
+                    // 3. 矩阵更新
+                    const x = startX + c * cubeW;
+                    const mirrorX = -x; // 镜像摄像头
+                    const y = startY - r * cubeH;
+                    
+                    // 移除扭曲和 Z 轴位移，保持纯净的分割感
+                    dummy3D.position.set(mirrorX, y, 0);
+                    
+                    // 缩放设为 0.97，产生明显的分割缝隙感
+                    dummy3D.scale.set(cubeW * 0.97, cubeH * 0.97, 1);
+                    
+                    dummy3D.rotation.set(0, 0, 0);
+                    
+                    dummy3D.updateMatrix();
+                    instancedMesh.setMatrixAt(i, dummy3D.matrix);
+                    i++;
+                }
+            }
+            
+            if (currentImageData) {
+                lastImageData = currentImageData;
+                instancedMesh.instanceColor.needsUpdate = true;
+            }
+            instancedMesh.instanceMatrix.needsUpdate = true;
+            renderer3D.render(scene3D, camera3D);
+        }
+
+        // 主渲染循环
+        let lastRenderedState = -1;
+        function renderLoop() {
+            frameCount++;
+            // 始终更新状态机
+            updateStateMachine();
+
+            if (currentState !== lastRenderedState) {
+                if (currentState === 0) {
+                    threeCanvas.style.display = 'block';
+                    canvas.style.display = 'none';
+                } else {
+                    threeCanvas.style.display = 'none';
+                    canvas.style.display = 'block';
+                }
+                lastRenderedState = currentState;
+            }
+
+            if (currentState === 0) {
+                updateThreeJS();
+                requestAnimationFrame(renderLoop);
+                return; // 状态0下跳过 2D Canvas 的所有绘制逻辑
+            }
+
+            ctx.clearRect(0, 0, width, height);
+
+            // 绘制底层摄像头画面 (镜像并铺满)
+            if (videoElement.videoWidth > 0) {
+                ctx.save();
+                ctx.translate(width, 0);
+                ctx.scale(-1, 1);
+                const scale = Math.max(width / videoElement.videoWidth, height / videoElement.videoHeight);
+                const vw = videoElement.videoWidth * scale;
+                const vh = videoElement.videoHeight * scale;
+                ctx.globalAlpha = 0.8; // 提高视频透明度，让画面更亮
+                ctx.drawImage(videoElement, (width - vw)/2, (height - vh)/2, vw, vh);
+                ctx.restore();
+                
+                // 叠加一层较浅的深色半透明遮罩，保证亮度
+                ctx.fillStyle = 'rgba(11, 12, 16, 0.2)';
+                ctx.fillRect(0, 0, width, height);
+            }
+
+            // 根据状态机执行不同视觉逻辑
+            if (currentState === 1 || currentState === 2) {
+                domCards.forEach(card => card.update());
+            }
+
+            if (currentState === 3 || currentState === 4) {
+                particles.forEach(p => {
+                    p.update(currentState);
+                    p.draw(ctx);
+                });
+            }
+
+            // 绘制 Like 爱心
+            if (isPointing) {
+                // 持续产生爱心
+                if (frameCount % 3 === 0) {
+                    hearts.push(new Heart(indexTipPos.x, indexTipPos.y));
+                }
+            }
+
+            hearts.forEach((h, index) => {
+                h.update();
+                h.draw(ctx);
+                if (h.opacity <= 0) {
+                    hearts.splice(index, 1);
+                }
+            });
+
+            requestAnimationFrame(renderLoop);
+        }
+
+        // 启动循环
+        renderLoop();
+    </script>
+</body>
+</html>

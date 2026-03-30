@@ -1,0 +1,5 @@
+{
+  "name": "Digital Identity Art",
+  "description": "Interactive cyber-punk art using MediaPipe",
+  "requestFramePermissions": ["camera"]
+}
